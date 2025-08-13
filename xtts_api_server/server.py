@@ -14,6 +14,7 @@ from loguru import logger
 from argparse import ArgumentParser
 from pathlib import Path
 from uuid import uuid4
+import asyncio
 
 from xtts_api_server.tts_funcs import TTSWrapper,supported_languages,InvalidSettingsError
 from xtts_api_server.RealtimeTTS import TextToAudioStream, CoquiEngine
@@ -36,6 +37,9 @@ USE_CACHE = os.getenv("USE_CACHE") == 'true'
 STREAM_MODE = os.getenv("STREAM_MODE") == 'true'
 STREAM_MODE_IMPROVE = os.getenv("STREAM_MODE_IMPROVE") == 'true'
 STREAM_PLAY_SYNC = os.getenv("STREAM_PLAY_SYNC") == 'true'
+
+# global lock for synchronized TTS generation
+tts_lock = asyncio.Lock()
 
 if(DEEPSPEED):
   install_deepspeed_based_on_python_version()
@@ -223,30 +227,27 @@ def set_tts_settings_endpoint(tts_settings_req: TTSSettingsRequest):
 
 @app.get('/tts_stream')
 async def tts_stream(request: Request, text: str = Query(), speaker_wav: str = Query(), language: str = Query()):
-    # Validate local model source.
     if XTTS.model_source != "local":
-        raise HTTPException(status_code=400,
-                            detail="HTTP Streaming is only supported for local models.")
-    # Validate language code against supported languages.
+        raise HTTPException(status_code=400, detail="HTTP Streaming is only supported for local models.")
+    
     if language.lower() not in supported_languages:
-        raise HTTPException(status_code=400,
-                            detail="Language code sent is either unsupported or misspelled.")
-            
+        raise HTTPException(status_code=400, detail="Language code sent is either unsupported or misspelled.")
+
     async def generator():
-        chunks = XTTS.process_tts_to_file(
-            text=text,
-            speaker_name_or_path=speaker_wav,
-            language=language.lower(),
-            stream=True,
-        )
-        # Write file header to the output stream.
-        yield XTTS.get_wav_header()
-        async for chunk in chunks:
-            # Check if the client is still connected.
-            disconnected = await request.is_disconnected()
-            if disconnected:
-                break
-            yield chunk
+        # wait until the lock is available
+        async with tts_lock:
+            chunks = XTTS.process_tts_to_file(
+                text=text,
+                speaker_name_or_path=speaker_wav,
+                language=language.lower(),
+                stream=True,
+            )
+            yield XTTS.get_wav_header()
+            async for chunk in chunks:
+                disconnected = await request.is_disconnected()
+                if disconnected:
+                    break
+                yield chunk
 
     return StreamingResponse(generator(), media_type='audio/x-wav')
 
