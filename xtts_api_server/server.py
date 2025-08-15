@@ -114,7 +114,7 @@ def play_stream(stream,language):
       stream.play()
     else:
       stream.play_async()
-
+      
 class OutputFolderRequest(BaseModel):
     output_folder: str
 
@@ -170,7 +170,15 @@ def get_folders():
 @app.get("/get_models_list")
 def get_models_list():
     return XTTS.get_models_list()
-
+    
+@app.get("/get_stream_mode/")
+def check_stream_mode():
+    return {
+        "STREAM_MODE": STREAM_MODE,
+        "STREAM_MODE_IMPROVE": STREAM_MODE_IMPROVE,
+        "STREAM_PLAY_SYNC": STREAM_PLAY_SYNC
+    }
+    
 @app.get("/get_tts_settings")
 def get_tts_settings():
     settings = {**XTTS.tts_settings,"stream_chunk_size":XTTS.stream_chunk_size}
