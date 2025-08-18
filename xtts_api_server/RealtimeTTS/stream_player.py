@@ -9,6 +9,7 @@ import logging
 import queue
 import time
 import io
+import os
 
 
 class AudioConfiguration:
@@ -22,10 +23,19 @@ class AudioConfiguration:
             format (int): Audio format, defaults to pyaudio.paInt16
             channels (int): Number of channels, defaults to 1 (mono)
             rate (int): Sample rate, defaults to 16000
+            output_device_index (int): Index of the output device to use, defaults to None (system default)
         """
         self.format = format
         self.channels = channels
         self.rate = rate
+        # Hole den Wert der Umgebungsvariablen
+        audio_device_index_str = os.getenv('AUDIO_DEVICE')
+        
+        # Versuche, den Wert in eine Ganzzahl zu konvertieren, setze auf None bei Fehler
+        try:
+            self.output_device_index = int(audio_device_index_str) if audio_device_index_str is not None else None
+        except ValueError:
+            self.output_device_index = None
 
 
 class AudioStream:
@@ -45,7 +55,6 @@ class AudioStream:
     def open_stream(self):
         """Opens an audio stream."""
 
-        # check for mpeg format
         pyChannels = self.config.channels
         pySampleRate = self.config.rate
 
@@ -56,7 +65,13 @@ class AudioStream:
             pyFormat = self.config.format
             logging.debug(f"Opening stream for wave audio chunks, pyFormat: {pyFormat}, pyChannels: {pyChannels}, pySampleRate: {pySampleRate}")
 
-        self.stream = self.pyaudio_instance.open(format=pyFormat, channels=pyChannels, rate=pySampleRate, output=True)
+        self.stream = self.pyaudio_instance.open(
+            format=pyFormat,
+            channels=pyChannels,
+            rate=pySampleRate,
+            output=True,
+            output_device_index=self.config.output_device_index  # Use the specified device index
+        )
 
     def start_stream(self):
         """Starts the audio stream."""
@@ -252,9 +267,14 @@ class StreamPlayer:
             return
 
         if immediate:
+            self.playback_active = False
             self.immediate_stop.set()
-            while self.playback_active:
-                time.sleep(0.1)
+            if self.playback_thread and self.playback_thread.is_alive():
+                self.playback_thread.join()
+            self.audio_stream.close_stream()
+            self.immediate_stop.clear()
+            self.buffer_manager.clear_buffer()
+            self.playback_thread = None
             return
 
         self.playback_active = False

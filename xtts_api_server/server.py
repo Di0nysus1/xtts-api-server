@@ -14,6 +14,7 @@ from loguru import logger
 from argparse import ArgumentParser
 from pathlib import Path
 from uuid import uuid4
+import asyncio
 
 from xtts_api_server.tts_funcs import TTSWrapper,supported_languages,InvalidSettingsError
 from xtts_api_server.RealtimeTTS import TextToAudioStream, CoquiEngine
@@ -36,6 +37,9 @@ USE_CACHE = os.getenv("USE_CACHE") == 'true'
 STREAM_MODE = os.getenv("STREAM_MODE") == 'true'
 STREAM_MODE_IMPROVE = os.getenv("STREAM_MODE_IMPROVE") == 'true'
 STREAM_PLAY_SYNC = os.getenv("STREAM_PLAY_SYNC") == 'true'
+
+# global lock for synchronized TTS generation
+tts_lock = asyncio.Lock()
 
 if(DEEPSPEED):
   install_deepspeed_based_on_python_version()
@@ -110,7 +114,7 @@ def play_stream(stream,language):
       stream.play()
     else:
       stream.play_async()
-
+      
 class OutputFolderRequest(BaseModel):
     output_folder: str
 
@@ -166,7 +170,15 @@ def get_folders():
 @app.get("/get_models_list")
 def get_models_list():
     return XTTS.get_models_list()
-
+    
+@app.get("/get_stream_mode/")
+def check_stream_mode():
+    return {
+        "STREAM_MODE": STREAM_MODE,
+        "STREAM_MODE_IMPROVE": STREAM_MODE_IMPROVE,
+        "STREAM_PLAY_SYNC": STREAM_PLAY_SYNC
+    }
+    
 @app.get("/get_tts_settings")
 def get_tts_settings():
     settings = {**XTTS.tts_settings,"stream_chunk_size":XTTS.stream_chunk_size}
@@ -177,10 +189,19 @@ def get_sample(file_name: str):
     # A fix for path traversal vulenerability. 
     # An attacker may summon this endpoint with ../../etc/passwd and recover the password file of your PC (in linux) or access any other file on the PC
     if ".." in file_name:
-        raise HTTPException(status_code=404, detail=".. in the file name! Are you kidding me?") 
-    file_path = os.path.join(XTTS.speaker_folder, file_name)
-    if os.path.isfile(file_path):
-        return FileResponse(file_path, media_type="audio/wav")
+        raise HTTPException(status_code=404, detail=".. in the file name! Are you kidding me?")        
+    # Robust path traversal protection
+    try:
+        base = Path(XTTS.speaker_folder).resolve(strict=True)
+        target = (base / file_name).resolve()
+        # Ensure the resolved target is under the base directory
+        if not str(target).startswith(str(base) + os.sep):
+            raise HTTPException(status_code=404, detail="Invalid file path")
+    except Exception:
+        raise HTTPException(status_code=404, detail="Invalid file path")
+
+    if target.is_file():
+        return FileResponse(str(target), media_type="audio/wav")
     else:
         logger.error("File not found")
         raise HTTPException(status_code=404, detail="File not found")
@@ -223,32 +244,60 @@ def set_tts_settings_endpoint(tts_settings_req: TTSSettingsRequest):
 
 @app.get('/tts_stream')
 async def tts_stream(request: Request, text: str = Query(), speaker_wav: str = Query(), language: str = Query()):
-    # Validate local model source.
     if XTTS.model_source != "local":
         raise HTTPException(status_code=400,
                             detail="HTTP Streaming is only supported for local models.")
-    # Validate language code against supported languages.
+                            
     if language.lower() not in supported_languages:
         raise HTTPException(status_code=400,
                             detail="Language code sent is either unsupported or misspelled.")
-            
-    async def generator():
+                            
+    if not os.path.isfile(XTTS.get_speaker_wav(speaker_wav)):
+        raise HTTPException(status_code=400, detail="Speaker not found!")
+        
+    # Cache-Schlüssel vorbereiten
+    clear_text = XTTS.clean_text(text)
+    text_params = {
+        'text': clear_text,
+        'speaker_name_or_path': speaker_wav,
+        'language': language.lower()
+    }
+    cached_result = XTTS.check_cache(text_params)
+    async def generator_from_file(path: str):
+        with open(path, "rb") as f:
+            # 1. Echten Header aus Datei senden
+            header = f.read(44)
+            yield header
+    
+            # 2. Danach PCM-Daten
+            while True:
+                chunk = f.read(4096)
+                if not chunk:
+                    break
+                if await request.is_disconnected():
+                    break
+                yield chunk
+    async def generator_new():
+        """Generiert neue TTS-Ausgabe und streamt sie."""
         chunks = XTTS.process_tts_to_file(
             text=text,
             speaker_name_or_path=speaker_wav,
             language=language.lower(),
             stream=True,
         )
-        # Write file header to the output stream.
+        # Header senden
         yield XTTS.get_wav_header()
         async for chunk in chunks:
-            # Check if the client is still connected.
             disconnected = await request.is_disconnected()
             if disconnected:
                 break
             yield chunk
-
-    return StreamingResponse(generator(), media_type='audio/x-wav')
+    if cached_result is not None:
+        # Im Cache: Datei blockweise streamen
+        return StreamingResponse(generator_from_file(cached_result), media_type="audio/x-wav")
+    else:
+        # Neu generieren: Header + PCM streamen
+        return StreamingResponse(generator_new(), media_type="audio/x-wav")
 
 @app.post("/tts_to_audio/")
 async def tts_to_audio(request: SynthesisRequest, background_tasks: BackgroundTasks):
@@ -262,6 +311,9 @@ async def tts_to_audio(request: SynthesisRequest, background_tasks: BackgroundTa
 
             speaker_wav = XTTS.get_speaker_wav(request.speaker_wav)
             language = request.language[0:2]
+            
+            if not os.path.isfile(speaker_wav):
+                raise HTTPException(status_code=400, detail="Speaker not found!")
 
             if stream.is_playing() and not STREAM_PLAY_SYNC:
                 stream.stop()
@@ -295,6 +347,10 @@ async def tts_to_audio(request: SynthesisRequest, background_tasks: BackgroundTa
                 raise HTTPException(status_code=400,
                                     detail="Language code sent is either unsupported or misspelled.")
 
+            
+            if not os.path.isfile(XTTS.get_speaker_wav(request.speaker_wav)):
+                raise HTTPException(status_code=400, detail="Speaker not found!")
+            
             # Generate an audio file using process_tts_to_file.
             output_file_path = XTTS.process_tts_to_file(
                 text=request.text,
@@ -328,6 +384,9 @@ async def tts_to_file(request: SynthesisFileRequest):
              raise HTTPException(status_code=400,
                                  detail="Language code sent is either unsupported or misspelled.")
 
+        if not os.path.isfile(XTTS.get_speaker_wav(request.speaker_wav)):
+            raise HTTPException(status_code=400, detail="Speaker not found!")
+        
         # Now use process_tts_to_file for saving the file.
         output_file = XTTS.process_tts_to_file(
             text=request.text,

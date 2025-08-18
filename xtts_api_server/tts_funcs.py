@@ -91,9 +91,11 @@ class TTSWrapper:
         self.is_official_model = True
         
         if self.enable_cache_results:
-            # Reset the contents of the cache file at each initialization.
-            with open(self.cache_file_path, 'w') as cache_file:
-                json.dump({}, cache_file)
+            if not os.path.isfile(self.cache_file_path):
+                #only recreate, when file is not found
+                with open(self.cache_file_path, 'w') as cache_file:
+                    json.dump({}, cache_file)
+                
     # HELP FUNC
     def isModelOfficial(self,model_version):
         if model_version in official_model_list:
