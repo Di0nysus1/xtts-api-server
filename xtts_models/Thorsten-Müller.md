@@ -14,9 +14,3 @@ Das trainierte Modell kann hier heruntergeladen werden:
 👉 [Download-Link (Workupload)](https://workupload.com/file/mC8z9EGSAJ4)
 
 Nach dem Download die Datei einfach **im Ordner `xtts_models` entpacken**.
-
-
-## Ordnerstruktur
-
-So sollte es nach dem Entpacken aussehen:
-
