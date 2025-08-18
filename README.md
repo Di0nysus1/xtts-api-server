@@ -12,6 +12,14 @@ If you are looking for an option for normal XTTS use look here [https://github.c
 
 **Recently I have little time to do this project, so I advise you to get acquainted with a [similar project](https://github.com/erew123/alltalk_tts)**
 
+
+
+## Thorsten Müller TTS Modell
+
+Das Projekt nutzt ein mit der Stimme von **Thorsten Müller** trainiertes Modell.  
+👉 [Mehr Infos & Download hier](xtts_models/Thorsten-Müller.md)
+
+
 ## Changelog
 
 You can keep track of all changes on the [release page](https://github.com/daswer123/xtts-api-server/releases)
